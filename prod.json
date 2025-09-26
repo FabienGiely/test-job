@@ -1,0 +1,70 @@
+[
+  {
+    "name": "sesha-interface-back",
+    "version": "6.1.8"
+  },
+  {
+    "name": "sesha-forms-back",
+    "version": "1.9.0"
+  },
+  {
+    "name": "sesha-puppeteer-api",
+    "version": "2.2.2"
+  },
+  {
+    "name": "sesha-agent-handler",
+    "version": "1.18.18"
+  },
+  {
+    "name": "sesha-back-worker",
+    "version": "1.11.18"
+  },
+  {
+    "name": "sesha-webhooks-handler-sage",
+    "version": "2.1.9"
+  },
+  {
+    "name": "sesha-updates-handler-sage",
+    "version": "2.1.21"
+  },
+  {
+    "name": "sesha-updates-handler-acd",
+    "version": "2.2.37"
+  },
+  {
+    "name": "sesha-updates-handler-cegid",
+    "version": "2.2.1"
+  },
+  {
+    "name": "sesha-updates-handler-agiris",
+    "version": "3.0.4"
+  },
+  {
+    "name": "sesha-updates-handler-myunisoft",
+    "version": "2.3.4"
+  },
+  {
+    "name": "sesha-updates-handler-fulll",
+    "version": "2.3.2"
+  },
+  {
+    "name": "sesha-updates-handler-cegidloop",
+    "version": "3.0.16"
+  },
+  {
+    "name": "sesha-updates-handler-cegidexpert",
+    "version": "1.4.2"
+  },
+  {
+    "name": "sesha-updates-handler-chift",
+    "version": "1.1.2"
+  },
+  {
+    "name": "sesha-updates-handler-pennylane",
+    "version": "0.1.9"
+  },
+  {
+    "name": "sesha-kpi",
+    "version": "2.3.2"
+  }
+]

@@ -1,0 +1,134 @@
+name: Check version drift preprod vs prod
+
+on:
+  pull_request:
+    branches: [ release-prod ]
+    types: [opened, synchronize, reopened, edited]
+  workflow_dispatch:
+
+jobs:
+  compare-versions:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compare preprod.json vs prod.json
+        id: compare
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+
+          PREPROD="preprod.json"
+          PROD="prod.json"
+
+          if [[ ! -f "$PREPROD" || ! -f "$PROD" ]]; then
+            echo "::error ::Fichiers $PREPROD ou $PROD introuvables."
+            exit 1
+          fi
+
+          # Listes de services
+          jq -r '.[].name' "$PREPROD" | sort > /tmp/preprod.names
+          jq -r '.[].name' "$PROD"     | sort > /tmp/prod.names
+
+          # Services manquants
+          MISSING_IN_PROD=$(comm -23 /tmp/preprod.names /tmp/prod.names || true)
+          MISSING_IN_PREPROD=$(comm -13 /tmp/preprod.names /tmp/prod.names || true)
+
+          # Versions différentes sur les services communs
+          COMMON=$(comm -12 /tmp/preprod.names /tmp/prod.names || true)
+
+          DIFFS=""
+          while IFS= read -r SVC; do
+            [[ -z "$SVC" ]] && continue
+            VP=$(jq -r --arg n "$SVC" '.[] | select(.name==$n) | .version' "$PREPROD")
+            VR=$(jq -r --arg n "$SVC" '.[] | select(.name==$n) | .version' "$PROD")
+            if [[ "$VP" != "$VR" ]]; then
+              DIFFS+="- \`$SVC\`: preprod=\`$VP\` vs prod=\`$VR\`\n"
+              echo "::error ::$SVC: preprod=$VP vs prod=$VR"
+            fi
+          done <<< "$COMMON"
+
+          HAS_DIFFS=0
+          SUMMARY="### 🔎 Comparaison des versions (preprod vs prod)\n"
+
+          if [[ -n "$MISSING_IN_PROD" ]]; then
+            HAS_DIFFS=1
+            SUMMARY+="\n**Manquants dans prod**:\n"
+            while IFS= read -r SVC; do
+              [[ -z "$SVC" ]] && continue
+              SUMMARY+="- \`$SVC\`\n"
+              echo "::warning ::$SVC présent en preprod mais absent en prod"
+            done <<< "$MISSING_IN_PROD"
+          fi
+
+          if [[ -n "$MISSING_IN_PREPROD" ]]; then
+            HAS_DIFFS=1
+            SUMMARY+="\n**Manquants dans preprod**:\n"
+            while IFS= read -r SVC; do
+              [[ -z "$SVC" ]] && continue
+              SUMMARY+="- \`$SVC\`\n"
+              echo "::warning ::$SVC présent en prod mais absent en preprod"
+            done <<< "$MISSING_IN_PREPROD"
+          fi
+
+          if [[ -n "$DIFFS" ]]; then
+            HAS_DIFFS=1
+            SUMMARY+="\n**Versions différentes**:\n$DIFFS"
+          fi
+
+          if [[ $HAS_DIFFS -eq 0 ]]; then
+            SUMMARY+="\n✅ Aucune différence détectée."
+            echo "has_diffs=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_diffs=true" >> $GITHUB_OUTPUT
+          fi
+
+          # Ajout au Job Summary
+          printf "%b" "$SUMMARY" >> $GITHUB_STEP_SUMMARY
+
+          # Export du résumé pour le commentaire PR
+          SUMMARY_ESCAPED=$(printf "%b" "$SUMMARY")
+          SUMMARY_ESCAPED="${SUMMARY_ESCAPED//'%'/%25}"
+          SUMMARY_ESCAPED="${SUMMARY_ESCAPED//$'\n'/%0A}"
+          SUMMARY_ESCAPED="${SUMMARY_ESCAPED//$'\r'/%0D}"
+          echo "summary_for_comment=$SUMMARY_ESCAPED" >> $GITHUB_OUTPUT
+
+          # Si différences, exit 1 (mais la step reste non bloquante grâce à continue-on-error)
+          if [[ $HAS_DIFFS -ne 0 ]]; then
+            exit 1
+          fi
+
+      - name: Comment PR with results
+        if: always() && github.event.pull_request.number != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const hasDiffs = core.getInput('has_diffs', { required: false }) || core.getState('has_diffs');
+            const fromStep = core.getInput('summary_for_comment', { required: false }) || '';
+            // Récupère depuis les outputs de la step 'compare'
+            const compare = core.getState('compare') || {};
+          result-encoding: string
+        env:
+          has_diffs: ${{ steps.compare.outputs.has_diffs }}
+          summary_for_comment: ${{ steps.compare.outputs.summary_for_comment }}
+
+      - name: Post PR comment (pretty)
+        if: always() && github.event.pull_request.number != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = decodeURIComponent(process.env.SUMMARY_FOR_COMMENT || '');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: body ? body : "Comparaison effectuée."
+            });
+        env:
+          SUMMARY_FOR_COMMENT: ${{ steps.compare.outputs.summary_for_comment }}
