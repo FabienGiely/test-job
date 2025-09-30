@@ -77,16 +77,16 @@ jobs:
           common_files=sorted(pre_files&prod_files)
 
           has_diffs=False
-          lines=["### 🔎 Vérification des envs (preprod vs prod)"]
+          lines=["# 🔎 Vérification des envs (preprod vs prod)"]
 
           if missing_in_prod:
               has_diffs=True
-              lines.append("\n**Fichiers manquants dans prod**:")
+              lines.append("\n## Fichiers manquants dans prod:")
               lines += [f"- `{f}`" for f in missing_in_prod]
 
           if missing_in_pre:
               has_diffs=True
-              lines.append("\n**Fichiers manquants dans preprod**:")
+              lines.append("\n## Fichiers manquants dans preprod:")
               lines += [f"- `{f}`" for f in missing_in_pre]
 
           def value_checks(k,vpre,vprd):
@@ -119,11 +119,11 @@ jobs:
               section=[]
               if miss_in_prod:
                   has_diffs=True
-                  section.append("**Variables manquantes dans prod**:")
+                  section.append("\n**Variables manquantes dans prod**:")
                   section += [f"- `{k}`" for k in miss_in_prod]
               if miss_in_pre:
                   has_diffs=True
-                  section.append("**Variables manquantes dans preprod**:")
+                  section.append("\n**Variables manquantes dans preprod**:")
                   section += [f"- `{k}`" for k in miss_in_pre]
 
               token_errs=[]
@@ -136,7 +136,7 @@ jobs:
                   section += [f"- {e}" for e in token_errs]
 
               if section:
-                  lines.append(f"\n#### Fichier `{rel}`")
+                  lines.append(f"\n## Fichier `{rel}`")
                   lines+=section
 
           if not has_diffs:
