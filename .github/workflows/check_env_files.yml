@@ -1,0 +1,170 @@
+name: Check env drift (preprod vs prod)
+
+on:
+  pull_request:
+    branches: [release-prod]
+    types: [opened, synchronize, reopened, edited]
+  workflow_dispatch:
+
+jobs:
+  env-drift:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    env:
+      ENV_PREPROD_DIR: env/preprod         # dossier des envs preprod
+      ENV_PROD_DIR: env/prod               # dossier des envs prod
+      FILE_GLOB: "*"                       # ex: "*.env"
+      FILE_IGNORE_REGEX: ""                # ex: "(?i)readme|sample"
+      KEY_IGNORE_REGEX: ""                 # ex: "DEBUG|TMP_*"
+      VALUE_TOKEN_RULES_JSON: '[["preprod","prod"]]'  # règles de valeur
+      STRICT_TOKEN_SWAP: "false"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compare env directories
+        id: compare
+        shell: python
+        run: |
+          import os, re, sys, glob, base64, json
+
+          pre_dir   = os.environ["ENV_PREPROD_DIR"]
+          prod_dir  = os.environ["ENV_PROD_DIR"]
+          file_glob = os.environ["FILE_GLOB"]
+          file_ign  = os.environ["FILE_IGNORE_REGEX"]
+          key_ign   = os.environ["KEY_IGNORE_REGEX"]
+          rules     = json.loads(os.environ["VALUE_TOKEN_RULES_JSON"])
+          strict    = os.environ["STRICT_TOKEN_SWAP"].lower() == "true"
+
+          file_ign_re = re.compile(file_ign) if file_ign else None
+          key_ign_re  = re.compile(key_ign) if key_ign else None
+          rules = [(re.compile(re.escape(a), re.I), re.compile(re.escape(b), re.I), a, b) for a,b in rules]
+
+          def parse_env(path):
+              data = {}
+              if not os.path.isfile(path): return data
+              with open(path, "r", encoding="utf-8", errors="replace") as f:
+                  for line in f:
+                      line=line.strip()
+                      if not line or line.startswith("#"): continue
+                      if line.lower().startswith("export "): line=line[7:].lstrip()
+                      m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$', line)
+                      if not m: continue
+                      k,v = m.groups()
+                      if ((v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'"))) and len(v)>=2:
+                          v=v[1:-1]
+                      data[k]=v
+              return data
+
+          def list_files(d):
+              files=set()
+              for p in glob.glob(os.path.join(d,file_glob)):
+                  if os.path.isfile(p):
+                      rel=os.path.basename(p)
+                      if file_ign_re and file_ign_re.search(rel): continue
+                      files.add(rel)
+              return files
+
+          pre_files=list_files(pre_dir)
+          prod_files=list_files(prod_dir)
+
+          missing_in_prod=sorted(pre_files-prod_files)
+          missing_in_pre=sorted(prod_files-pre_files)
+          common_files=sorted(pre_files&prod_files)
+
+          has_diffs=False
+          lines=["# 🔎 Vérification des envs (preprod vs prod)"]
+
+          if missing_in_prod:
+              has_diffs=True
+              lines.append("\n## Fichiers manquants dans prod:")
+              lines += [f"- `{f}`" for f in missing_in_prod]
+
+          if missing_in_pre:
+              has_diffs=True
+              lines.append("\n## Fichiers manquants dans preprod:")
+              lines += [f"- `{f}`" for f in missing_in_pre]
+
+          def value_checks(k,vpre,vprd):
+              errs=[]
+              for rx_a,rx_b,a,b in rules:
+                  if rx_a.search(vpre):
+                      if not rx_b.search(vprd):
+                          errs.append(f"`{k}`: attendu `{b}` en prod (trouvé: `{vprd}`)")
+                      if rx_a.search(vprd):
+                          errs.append(f"`{k}`: valeur prod ne doit pas contenir `{a}` (trouvé: `{vprd}`)")
+                      if strict:
+                          swapped=rx_a.sub(b,vpre)
+                          if swapped!=vprd:
+                              errs.append(f"`{k}`: après swap {a}→{b}, preprod=`{swapped}` ≠ prod=`{vprd}`")
+              return errs
+
+          for rel in common_files:
+              pre=parse_env(os.path.join(pre_dir,rel))
+              prd=parse_env(os.path.join(prod_dir,rel))
+              pre_keys=set(pre.keys())
+              prd_keys=set(prd.keys())
+              if key_ign_re:
+                  pre_keys={k for k in pre_keys if not key_ign_re.search(k)}
+                  prd_keys={k for k in prd_keys if not key_ign_re.search(k)}
+
+              miss_in_prod=sorted(pre_keys-prd_keys)
+              miss_in_pre=sorted(prd_keys-pre_keys)
+              common_keys=sorted(pre_keys&prd_keys)
+
+              section=[]
+              if miss_in_prod:
+                  has_diffs=True
+                  section.append("\n**Variables manquantes dans prod**:")
+                  section += [f"- `{k}`" for k in miss_in_prod]
+              if miss_in_pre:
+                  has_diffs=True
+                  section.append("\n**Variables manquantes dans preprod**:")
+                  section += [f"- `{k}`" for k in miss_in_pre]
+
+              token_errs=[]
+              for k in common_keys:
+                  token_errs+=value_checks(k,pre[k],prd[k])
+
+              if token_errs:
+                  has_diffs=True
+                  section.append("**Problèmes de valeurs**:")
+                  section += [f"- {e}" for e in token_errs]
+
+              if section:
+                  lines.append(f"\n## Fichier `{rel}`")
+                  lines+=section
+
+          if not has_diffs:
+              lines.append("\n✅ Aucune différence détectée.")
+
+          summary="\n".join(lines)
+          print(summary)
+
+          b64=base64.b64encode(summary.encode()).decode()
+          with open(os.environ["GITHUB_OUTPUT"],"a") as out:
+              out.write(f"summary_b64={b64}\n")
+              out.write(f"has_diffs={'true' if has_diffs else 'false'}\n")
+
+          if has_diffs:
+              sys.exit(1)
+
+      - name: Comment PR with results
+        if: always() && github.event.pull_request.number != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const b64 = process.env.SUMMARY_B64 || '';
+            const body = Buffer.from(b64, 'base64').toString('utf8');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: body || "Vérification effectuée."
+            });
+        env:
+          SUMMARY_B64: ${{ steps.compare.outputs.summary_b64 }}
