@@ -1,0 +1,223 @@
+name: Check env drift (preprod vs prod)
+
+on:
+  pull_request:
+    branches: [release-prod]
+    types: [opened, synchronize, reopened, edited]
+  workflow_dispatch:
+
+jobs:
+  env-drift:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    env:
+      ENV_PREPROD_DIR: env/preprod         # dossier des envs preprod
+      ENV_PROD_DIR: env/prod               # dossier des envs prod
+      FILE_GLOB: "*"                       # quels fichiers comparer (ex: "*.env")
+      FILE_IGNORE_REGEX: ""                # ex: "(?i)readme|sample"
+      KEY_IGNORE_REGEX: ""                 # ex: "DEBUG|SOME_TRANSIENT_KEY"
+      # Règles de valeur: si une valeur preprod contient "preprod", on attend "prod" côté prod (et pas "preprod")
+      # Format JSON: liste de couples [token_preprod, token_prod]
+      VALUE_TOKEN_RULES_JSON: '[["preprod","prod"]]'
+      # Optionnel: test “swap exact” (remplacer token_preprod->token_prod dans la valeur preprod et comparer à prod)
+      STRICT_TOKEN_SWAP: "false"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compare env directories
+        id: compare
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          PRE="$ENV_PREPROD_DIR"
+          PRD="$ENV_PROD_DIR"
+          GLOB="$FILE_GLOB"
+          FILE_IGN="${FILE_IGNORE_REGEX}"
+          KEY_IGN="${KEY_IGNORE_REGEX}"
+          RULES_JSON="$VALUE_TOKEN_RULES_JSON"
+          STRICT_SWAP="$STRICT_TOKEN_SWAP"
+
+          python3 - << 'PY' "$PRE" "$PRD" "$GLOB" "$FILE_IGN" "$KEY_IGN" "$RULES_JSON" "$STRICT_SWAP"
+          import os, re, sys, json, glob, base64
+          
+          pre_dir, prod_dir, file_glob, file_ign, key_ign, rules_json, strict_swap = sys.argv[1:]
+          file_ign_re = re.compile(file_ign) if file_ign else None
+          key_ign_re  = re.compile(key_ign)  if key_ign  else None
+          try:
+              rules = json.loads(rules_json) if rules_json.strip() else []
+              rules = [(re.compile(re.escape(a), re.I), re.compile(re.escape(b), re.I), a, b) for a,b in rules]
+          except Exception as e:
+              print(f"::warning ::Invalid VALUE_TOKEN_RULES_JSON: {e}")
+              rules = []
+
+          def parse_env_file(path):
+              d = {}
+              if not os.path.isfile(path):
+                  return d
+              with open(path, "r", encoding="utf-8", errors="replace") as f:
+                  for line in f:
+                      line = line.strip()
+                      if not line or line.startswith("#"):
+                          continue
+                      # support "export KEY=VAL"
+                      if line.lower().startswith("export "):
+                          line = line[7:].lstrip()
+                      m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$', line)
+                      if not m:
+                          continue
+                      k, v = m.group(1), m.group(2)
+                      # strip quotes if wrapped
+                      if ((v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'"))) and len(v) >= 2:
+                          v = v[1:-1]
+                      d[k] = v
+              return d
+
+          def list_files(dirpath):
+              files = set()
+              for p in glob.glob(os.path.join(dirpath, file_glob), recursive=False):
+                  if os.path.isfile(p):
+                      rel = os.path.basename(p)
+                      if file_ign_re and file_ign_re.search(rel):
+                          continue
+                      files.add(rel)
+              return files
+          
+          pre_files = list_files(pre_dir)
+          prd_files = list_files(prod_dir)
+          
+          missing_in_prod    = sorted(pre_files - prd_files)
+          missing_in_preprod = sorted(prd_files - pre_files)
+          common_files       = sorted(pre_files & prd_files)
+          
+          has_diffs = False
+          lines = ["### 🔎 Vérification des envs (preprod vs prod)"]
+          
+          if missing_in_prod:
+              has_diffs = True
+              lines.append("\n**Fichiers manquants dans prod**:")
+              for f in missing_in_prod:
+                  lines.append(f"- `{f}`")
+          
+          if missing_in_preprod:
+              has_diffs = True
+              lines.append("\n**Fichiers manquants dans preprod**:")
+              for f in missing_in_preprod:
+                  lines.append(f"- `{f}`")
+          
+          def value_token_checks(k, v_pre, v_prd):
+              """Apply token rules:
+                 - if token_preprod in v_pre => expect token_prod in v_prd and token_preprod NOT in v_prd
+                 - if strict_swap => replace token_preprod->token_prod in v_pre and compare with v_prd
+              """
+              errs = []
+              for rx_a, rx_b, a, b in rules:
+                  if rx_a.search(v_pre):
+                      if not rx_b.search(v_prd):
+                          errs.append(f"`{k}`: valeur prod attendue à contenir `{b}` (trouvée: `{v_prd}`)")
+                      if rx_a.search(v_prd):
+                          errs.append(f"`{k}`: valeur prod ne doit pas contenir `{a}` (trouvée: `{v_prd}`)")
+                      if strict_swap.lower() == "true":
+                          swapped = rx_a.sub(b, v_pre)
+                          if swapped != v_prd:
+                              errs.append(f"`{k}`: après swap `{a}`→`{b}`, preprod=`{swapped}` ≠ prod=`{v_prd}`")
+              return errs
+          
+          for rel in common_files:
+              pre_path = os.path.join(pre_dir, rel)
+              prd_path = os.path.join(prod_dir, rel)
+              env_pre = parse_env_file(pre_path)
+              env_prd = parse_env_file(prd_path)
+          
+              pre_keys = set(env_pre.keys())
+              prd_keys = set(env_prd.keys())
+          
+              if key_ign_re:
+                  pre_keys = {k for k in pre_keys if not key_ign_re.search(k)}
+                  prd_keys = {k for k in prd_keys if not key_ign_re.search(k)}
+          
+              miss_k_in_prod    = sorted(pre_keys - prd_keys)
+              miss_k_in_preprod = sorted(prd_keys - pre_keys)
+              common_keys       = sorted(pre_keys & prd_keys)
+          
+              section = []
+          
+              if miss_k_in_prod:
+                  has_diffs = True
+                  section.append("**Variables manquantes dans prod**:")
+                  for k in miss_k_in_prod:
+                      section.append(f"- `{k}`")
+          
+              if miss_k_in_preprod:
+                  has_diffs = True
+                  section.append("**Variables manquantes dans preprod**:")
+                  for k in miss_k_in_preprod:
+                      section.append(f"- `{k}`")
+          
+              diffs = []
+              token_errs = []
+              for k in common_keys:
+                  v_pre = env_pre.get(k, "")
+                  v_prd = env_prd.get(k, "")
+                  # comparaison brute (utile pour secrets non tokenisés)
+                  if v_pre == v_prd:
+                      # Souvent on attend des valeurs différentes (URLs, IDs, etc.)
+                      # On ne marque pas comme erreur par défaut, mais on peut le signaler
+                      pass
+                  # règles de token
+                  token_errs.extend(value_token_checks(k, v_pre, v_prd))
+          
+              if token_errs:
+                  has_diffs = True
+                  section.append("**Règles de valeur (preprod→prod) non respectées**:")
+                  for e in token_errs:
+                      section.append(f"- {e}")
+          
+              if section:
+                  lines.append(f"\n#### Fichier `{rel}`")
+                  lines.extend(section)
+          
+          if not has_diffs:
+              lines.append("\n✅ Aucune différence bloquante détectée.")
+          
+          summary = "\n".join(lines)
+          print(summary)
+          # Job Summary
+          print(f"::group::Résumé")
+          print(summary)
+          print(f"::endgroup::")
+          
+          # Passer aux steps suivantes
+          b64 = base64.b64encode(summary.encode("utf-8")).decode("ascii")
+          print(f"summary_b64={b64}")
+          
+          # Exporter vers GITHUB_OUTPUT proprement
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"summary_b64={b64}\n")
+              out.write(f"has_diffs={'true' if has_diffs else 'false'}\n")
+          
+          # Échec si diffs
+          if has_diffs:
+              sys.exit(1)
+          PY
+          
+                - name: Comment PR with results
+                  if: always() && github.event.pull_request.number != ''
+                  uses: actions/github-script@v7
+                  with:
+                    script: |
+                      const b64 = process.env.SUMMARY_B64 || '';
+                      const body = Buffer.from(b64, 'base64').toString('utf8') || 'Vérification effectuée.';
+                      await github.rest.issues.createComment({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        issue_number: context.payload.pull_request.number,
+                        body
+                      });
+                  env:
+                    SUMMARY_B64: ${{ steps.compare.outputs.summary_b64 }}
