@@ -9,7 +9,7 @@
   },
   {
     "name": "sesha-puppeteer-api",
-    "version": "2.2.4"
+    "version": "2.2.2"
   },
   {
     "name": "sesha-agent-handler",
@@ -49,7 +49,7 @@
   },
   {
     "name": "sesha-updates-handler-cegidloop",
-    "version": "3.0.15"
+    "version": "3.0.16"
   },
   {
     "name": "sesha-updates-handler-cegidexpert",
