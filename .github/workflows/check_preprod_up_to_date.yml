@@ -14,10 +14,9 @@ jobs:
       pull-requests: write
 
     env:
-      PREPROD_PATH: preprod.json
-      PROD_PATH: prod.json
-      # Optionnel: exclure des services du contrôle (regex)
-      IGNORE_REGEX: ""
+      PREPROD_PATH: preprod.json     # ex: env/preprod.json
+      PROD_PATH: prod.json           # ex: env/prod.json
+      IGNORE_REGEX: ""               # ex: "sesha-kpi|sesha-puppeteer-api"
 
     steps:
       - name: Checkout
@@ -42,9 +41,11 @@ jobs:
             TMPDIR="$(mktemp -d)"
             trap 'rm -rf "$TMPDIR"' EXIT
 
+            # Noms des services
             jq -r '.[].name' "$PREPROD" | sort -u > "$TMPDIR/preprod.names"
             jq -r '.[].name' "$PROD"     | sort -u > "$TMPDIR/prod.names"
 
+            # Applique éventuellement un filtre d'exclusion
             if [[ -n "${IGNORE_REGEX}" ]]; then
               grep -Ev "$IGNORE_REGEX" "$TMPDIR/preprod.names" > "$TMPDIR/preprod.filtered" || true
               grep -Ev "$IGNORE_REGEX" "$TMPDIR/prod.names"    > "$TMPDIR/prod.filtered"   || true
@@ -53,10 +54,80 @@ jobs:
               cp "$TMPDIR/prod.names"    "$TMPDIR/prod.filtered"
             fi
 
+            # Différences d'ensemble
             MISSING_IN_PROD=$(comm -23 "$TMPDIR/preprod.filtered" "$TMPDIR/prod.filtered" || true)
             MISSING_IN_PREPROD=$(comm -13 "$TMPDIR/preprod.filtered" "$TMPDIR/prod.filtered" || true)
             COMMON=$(comm -12 "$TMPDIR/preprod.filtered" "$TMPDIR/prod.filtered" || true)
 
             if [[ -n "$MISSING_IN_PROD" ]]; then
               HAS_DIFFS=1
-              SUMMARY+=$'\n**Manquants dans prod**
+              SUMMARY+=$'\n**Manquants dans prod**:\n'
+              while IFS= read -r SVC; do
+                [[ -z "${SVC:-}" ]] && continue
+                printf -v SUMMARY '%s- `%s`\n' "$SUMMARY" "$SVC"
+              done <<< "$MISSING_IN_PROD"
+            fi
+
+            if [[ -n "$MISSING_IN_PREPROD" ]]; then
+              HAS_DIFFS=1
+              SUMMARY+=$'\n**Manquants dans preprod**:\n'
+              while IFS= read -r SVC; do
+                [[ -z "${SVC:-}" ]] && continue
+                printf -v SUMMARY '%s- `%s`\n' "$SUMMARY" "$SVC"
+              done <<< "$MISSING_IN_PREPROD"
+            fi
+
+            # Versions différentes sur les services communs
+            DIFFS=""
+            while IFS= read -r SVC; do
+              [[ -z "${SVC:-}" ]] && continue
+              VP=$(jq -r --arg n "$SVC" '.[] | select(.name==$n) | .version' "$PREPROD")
+              VR=$(jq -r --arg n "$SVC" '.[] | select(.name==$n) | .version' "$PROD")
+              if [[ "$VP" != "$VR" ]]; then
+                printf -v DIFFS '%s- `%s`: preprod=`%s` vs prod=`%s`\n' "$DIFFS" "$SVC" "$VP" "$VR"
+              fi
+            done <<< "$COMMON"
+
+            if [[ -n "$DIFFS" ]]; then
+              HAS_DIFFS=1
+              SUMMARY+=$'\n**Versions différentes**:\n'
+              SUMMARY+="$DIFFS"
+            fi
+
+            if [[ $HAS_DIFFS -eq 0 ]]; then
+              SUMMARY+=$'\n✅ Aucune différence détectée.\n'
+            fi
+          fi
+
+          # Résumé visible dans l'onglet "Summary" du job
+          printf '%s' "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+
+          # Outputs pour la step suivante (base64 une ligne = safe)
+          echo "has_diffs=$HAS_DIFFS" >> "$GITHUB_OUTPUT"
+          if SUMMARY_B64=$(printf '%s' "$SUMMARY" | base64 -w0 2>/dev/null); then
+            :
+          else
+            SUMMARY_B64=$(printf '%s' "$SUMMARY" | base64 | tr -d '\n')
+          fi
+          echo "summary_b64=$SUMMARY_B64" >> "$GITHUB_OUTPUT"
+
+          # Échoue le job s'il y a des écarts (check rouge). La step suivante tourne quand même (if: always()).
+          if [[ $HAS_DIFFS -ne 0 ]]; then
+            exit 1
+          fi
+
+      - name: Comment PR with results
+        if: always() && github.event.pull_request.number != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const b64 = process.env.SUMMARY_B64 || '';
+            const body = Buffer.from(b64, 'base64').toString('utf8') || 'Comparaison effectuée.';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body
+            });
+        env:
+          SUMMARY_B64: ${{ steps.compare.outputs.summary_b64 }}
