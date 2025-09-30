@@ -1,8 +1,8 @@
-name: Check version drift preprod vs prod
+name: Check version drift (preprod vs prod)
 
 on:
   pull_request:
-    branches: [ release-prod ]
+    branches: [release-prod]
     types: [opened, synchronize, reopened, edited]
   workflow_dispatch:
 
@@ -11,7 +11,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write   # pour commenter la PR
+      pull-requests: write
+
+    env:
+      PREPROD_PATH: preprod.json    # adapte si besoin (ex: env/preprod.json)
+      PROD_PATH: prod.json          # adapte si besoin (ex: env/prod.json)
+      # Optionnel: ignorer certains services (séparés par |). Exemple: "sesha-kpi|sesha-puppeteer-api"
+      IGNORE_REGEX: ""
 
     steps:
       - name: Checkout
@@ -19,27 +25,42 @@ jobs:
 
       - name: Compare preprod.json vs prod.json
         id: compare
-        # <— cette step peut échouer (exit 1) pour que le JOB soit en rouge (non bloquant si non-required)
+        shell: bash
         run: |
-          set -euo pipefail
-          PREPROD="preprod.json"
-          PROD="prod.json"
+          set -Eeuo pipefail
 
+          PREPROD="$PREPROD_PATH"
+          PROD="$PROD_PATH"
+
+          # Vérif fichiers
           if [[ ! -f "$PREPROD" || ! -f "$PROD" ]]; then
-            SUMMARY="### 🔎 Comparaison des versions (preprod vs prod)\n:warning: Fichiers introuvables: \`$PREPROD\` ou \`$PROD\`."
-            echo "has_diffs=true" >> $GITHUB_OUTPUT
+            SUMMARY=$'### 🔎 Comparaison des versions (preprod vs prod)\n:warning: Fichiers introuvables: `'"$PREPROD"'` ou `'"$PROD"'`.'
+            HAS_DIFFS=1
           else
-            jq -r '.[].name' "$PREPROD" | sort > /tmp/preprod.names
-            jq -r '.[].name' "$PROD"     | sort > /tmp/prod.names
+            TMPDIR="$(mktemp -d)"
+            trap 'rm -rf "$TMPDIR"' EXIT
 
-            MISSING_IN_PROD=$(comm -23 /tmp/preprod.names /tmp/prod.names || true)
-            MISSING_IN_PREPROD=$(comm -13 /tmp/preprod.names /tmp.prod.names || true) || true
-            MISSING_IN_PREPROD=$(comm -13 /tmp/preprod.names /tmp/prod.names || true)
-            COMMON=$(comm -12 /tmp/preprod.names /tmp/prod.names || true)
+            # Extrait les noms; applique éventuellement un filtre d'ignorés
+            jq -r '.[].name' "$PREPROD" | sort -u > "$TMPDIR/preprod.names"
+            jq -r '.[].name' "$PROD"     | sort -u > "$TMPDIR/prod.names"
 
+            if [[ -n "${IGNORE_REGEX}" ]]; then
+              grep -Ev "$IGNORE_REGEX" "$TMPDIR/preprod.names" > "$TMPDIR/preprod.filtered" || true
+              grep -Ev "$IGNORE_REGEX" "$TMPDIR/prod.names"    > "$TMPDIR/prod.filtered"    || true
+            else
+              cp "$TMPDIR/preprod.names" "$TMPDIR/preprod.filtered"
+              cp "$TMPDIR/prod.names"    "$TMPDIR/prod.filtered"
+            fi
+
+            # Sets utiles
+            MISSING_IN_PROD=$(comm -23 "$TMPDIR/preprod.filtered" "$TMPDIR/prod.filtered" || true)
+            MISSING_IN_PREPROD=$(comm -13 "$TMPDIR/preprod.filtered" "$TMPDIR/prod.filtered" || true)
+            COMMON=$(comm -12 "$TMPDIR/preprod.filtered" "$TMPDIR/prod.filtered" || true)
+
+            # Versions différentes sur les services communs
             DIFFS=""
             while IFS= read -r SVC; do
-              [[ -z "$SVC" ]] && continue
+              [[ -z "${SVC:-}" ]] && continue
               VP=$(jq -r --arg n "$SVC" '.[] | select(.name==$n) | .version' "$PREPROD")
               VR=$(jq -r --arg n "$SVC" '.[] | select(.name==$n) | .version' "$PROD")
               if [[ "$VP" != "$VR" ]]; then
@@ -47,19 +68,26 @@ jobs:
               fi
             done <<< "$COMMON"
 
-            SUMMARY="### 🔎 Comparaison des versions (preprod vs prod)\n"
+            # Construit le résumé
             HAS_DIFFS=0
+            SUMMARY="### 🔎 Comparaison des versions (preprod vs prod)\n"
 
             if [[ -n "$MISSING_IN_PROD" ]]; then
               HAS_DIFFS=1
               SUMMARY+="\n**Manquants dans prod**:\n"
-              while IFS= read -r SVC; do [[ -n "$SVC" ]] && SUMMARY+="- \`$SVC\`\n"; done <<< "$MISSING_IN_PROD"
+              while IFS= read -r SVC; do
+                [[ -n "${SVC:-}" ]] && SUMMARY+="- \`$SVC\`\n"
+              done <<< "$MISSING_IN_PROD"
             fi
+
             if [[ -n "$MISSING_IN_PREPROD" ]]; then
               HAS_DIFFS=1
               SUMMARY+="\n**Manquants dans preprod**:\n"
-              while IFS= read -r SVC; do [[ -n "$SVC" ]] && SUMMARY+="- \`$SVC\`\n"; done <<< "$MISSING_IN_PREPROD"
+              while IFS= read -r SVC; do
+                [[ -n "${SVC:-}" ]] && SUMMARY+="- \`$SVC\`\n"
+              done <<< "$MISSING_IN_PREPROD"
             fi
+
             if [[ -n "$DIFFS" ]]; then
               HAS_DIFFS=1
               SUMMARY+="\n**Versions différentes**:\n$DIFFS"
@@ -67,24 +95,19 @@ jobs:
 
             if [[ $HAS_DIFFS -eq 0 ]]; then
               SUMMARY+="\n✅ Aucune différence détectée."
-              echo "has_diffs=false" >> $GITHUB_OUTPUT
-            else
-              echo "has_diffs=true" >> $GITHUB_OUTPUT
             fi
           fi
 
-          printf "%b" "$SUMMARY" >> $GITHUB_STEP_SUMMARY
+          # Résumé dans l’onglet "Summary" du job
+          printf "%b" "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
 
-          # encode pour passage via env (commentaire PR)
-          SUMMARY_URI=$(python3 - <<'PY'
-          import sys, urllib.parse
-          print(urllib.parse.quote(sys.stdin.read()))
-          PY
-          <<< "$SUMMARY")
-          echo "summary_uri=$SUMMARY_URI" >> $GITHUB_OUTPUT
+          # Expose aux steps suivantes (base64 1-ligne pour éviter les soucis d'encodage)
+          echo "has_diffs=$HAS_DIFFS" >> "$GITHUB_OUTPUT"
+          SUMMARY_B64=$(printf "%s" "$SUMMARY" | base64 -w0)
+          echo "summary_b64=$SUMMARY_B64" >> "$GITHUB_OUTPUT"
 
-          # Si différences, on échoue la step (le job sera rouge) — non bloquant si non-required.
-          if [[ "$(jq -r .has_diffs <<< "{\"has_diffs\":\"$(grep -o 'has_diffs=.*' $GITHUB_OUTPUT | cut -d= -f2 || echo false)\"}")" != "false" ]]; then
+          # Echoue la step (et donc le job) s’il y a des écarts
+          if [[ $HAS_DIFFS -ne 0 ]]; then
             exit 1
           fi
 
@@ -93,12 +116,13 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const body = decodeURIComponent(process.env.SUMMARY_URI || '');
+            const b64 = process.env.SUMMARY_B64 || '';
+            const body = Buffer.from(b64, 'base64').toString('utf8') || 'Comparaison effectuée.';
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.payload.pull_request.number,
-              body: body || "Comparaison effectuée."
+              body
             });
         env:
-          SUMMARY_URI: ${{ steps.compare.outputs.summary_uri }}
+          SUMMARY_B64: ${{ steps.compare.outputs.summary_b64 }}
