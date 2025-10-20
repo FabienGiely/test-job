@@ -1,0 +1,77 @@
+name: Forward merges (multi-line)
+on:
+  push:
+    branches: [ "release/*" ]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: forward-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect-targets:
+    runs-on: ubuntu-latest
+    outputs:
+      targets: ${{ steps.out.outputs.targets }}
+    env:
+      MAX_FORWARD: "5"     # ← ajuste ici : 3, 4, 5 lignes au max
+      INCLUDE_MAIN: "true" # met "false" si tu ne veux pas créer de PR vers main
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Build targets list (JSON)
+        id: out
+        run: |
+          branch="${GITHUB_REF_NAME}"   # ex: release/6.1
+          [[ "$branch" =~ ^release/([0-9]+)\.([0-9]+)$ ]] || { echo "Not a release branch"; exit 1; }
+          M="${BASH_REMATCH[1]}"
+          N="${BASHREMATCH[2]:-${BASH_REMATCH[2]}}"  # guard
+
+          # Lister les branches release/M.*
+          mapfile -t rels < <(git ls-remote --heads origin "refs/heads/release/${M}.*" | awk '{print $2}' | sed 's#refs/heads/##' | sort -t. -k2,2n)
+          targets=()
+
+          # Ajouter les mineures supérieures N+1 .. N+MAX_FORWARD si elles existent
+          i=1
+          while [ $i -le ${MAX_FORWARD} ]; do
+            next="release/${M}.$((N+i))"
+            if printf '%s\n' "${rels[@]}" | grep -qx "$next"; then
+              targets+=("$next")
+            fi
+            i=$((i+1))
+          done
+
+          # Optionnel: ajouter main
+          if [ "${INCLUDE_MAIN}" = "true" ]; then
+            targets+=("main")
+          fi
+
+          # Dédupliquer et transformer en JSON
+          uniq_targets=$(printf "%s\n" "${targets[@]}" | awk '!seen[$0]++')
+          json=$(printf '%s\n' "$uniq_targets" | jq -R . | jq -s .)
+          echo "targets=$json" >> "$GITHUB_OUTPUT"
+
+  forward:
+    needs: detect-targets
+    if: ${{ needs.detect-targets.outputs.targets != '[]' }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        base: ${{ fromJson(needs.detect-targets.outputs.targets) }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Open/Update PR to ${{ matrix.base }}
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          title: "chore: forward merge `${{ github.ref_name }}` → `${{ matrix.base }}`"
+          body: "Propagation automatique depuis `${{ github.ref_name }}`."
+          base: ${{ matrix.base }}
+          branch: auto/forward/${{ github.ref_name }}-to-${{ matrix.base }}
+          delete-branch: true
