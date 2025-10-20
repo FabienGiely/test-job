@@ -1,43 +1,133 @@
-name: Forward to main (with PAT)
+name: Forward merges (multi-line with PAT + diff check + debug)
 on:
   push:
-    branches: [ "release/*" ]   # à chaque push/merge sur une branche release
+    branches: [ "release/*" ]
 
 permissions:
-  contents: read   # on n’utilise pas le GITHUB_TOKEN ici pour créer la PR
+  contents: read
   pull-requests: read
 
 jobs:
-  forward:
+  detect-targets:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    env:
+      MAX_FORWARD: "5"     # p.ex. 5 lignes supérieures max
+      INCLUDE_MAIN: "true" # crée aussi une PR vers main
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        with: { fetch-depth: 0 }
+
+      - name: Build forward targets (robuste)
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="${GITHUB_REF_NAME}"   # ex: release/1.0
+          echo "Source branch: ${SRC}"
+
+          if [[ ! "$SRC" =~ ^release/([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Not a release/M.N branch → skip."
+            echo "matrix=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          M="${BASH_REMATCH[1]}"
+          N="${BASH_REMATCH[2]}"
+
+          # Liste fiable des branches distantes release/M.*
+          # (noms exacts, sans espaces parasites)
+          mapfile -t rels < <(
+            git ls-remote --heads origin "release/${M}.*" \
+              | awk '{print $2}' \
+              | sed 's#refs/heads/##' \
+              | sort -t. -k2,2n
+          )
+
+          echo "Remote release branches for major ${M}:"
+          printf ' - %s\n' "${rels[@]:-<none>}"
+
+          # Construit les cibles N+1..N+MAX_FORWARD si elles existent réellement au remote
+          targets=()
+          for ((i=1; i<=${MAX_FORWARD}; i++)); do
+            next="release/${M}.$((N+i))"
+            if printf '%s\n' "${rels[@]}" | grep -Fxq "$next"; then
+              targets+=("$next")
+            fi
+          done
+
+          if [[ "${INCLUDE_MAIN}" == "true" ]]; then
+            targets+=("main")
+          fi
+
+          # Dédup + affichage
+          uniq_targets=$(printf "%s\n" "${targets[@]}" | awk 'NF && !seen[$0]++')
+          echo "Forward targets:"
+          if [[ -z "${uniq_targets}" ]]; then
+            echo " - <none>"
+            echo "matrix=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf ' - %s\n' ${uniq_targets}
+
+          # Fabrique le JSON pour matrix.include : [ {"base":"release/1.1"}, {"base":"main"} ]
+          json='['; sep=''
+          while IFS= read -r t; do
+            json="${json}${sep}{\"base\":\"${t}\"}"; sep=','
+          done <<< "${uniq_targets}"
+          json="${json}]"
+
+          echo "matrix=${json}" >> "$GITHUB_OUTPUT"
+
+  forward:
+    needs: detect-targets
+    if: ${{ needs.detect-targets.outputs.matrix != '[]' }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.detect-targets.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
 
       - name: Fetch all branches
-        run: |
-          git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
+        run: git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
 
-      - name: Open PR if release is ahead of main
+      - name: Show ahead/diff against target
+        shell: bash
+        run: |
+          SRC="${GITHUB_REF_NAME}"
+          TGT="${{ matrix.base }}"
+          echo "=== ${SRC} → ${TGT} ==="
+          echo "Ahead commits:"
+          git rev-list --right-only --count "origin/${TGT}...origin/${SRC}" || true
+          echo "--- short log (SRC not in TGT) ---"
+          git log --oneline --left-right "origin/${TGT}...origin/${SRC}" | sed -n 's/^>//p' | head -50 || true
+          echo "--- diff stat ---"
+          git diff --stat "origin/${TGT}...origin/${SRC}" || true
+          echo "==============================="
+
+      - name: Open PR with PAT if ahead and diff
         env:
           GH_TOKEN: ${{ secrets.PAT_FORWARD }}
         shell: bash
         run: |
           set -euo pipefail
-          SRC="${GITHUB_REF_NAME}"    # ex: release/0.1
-          TGT="main"
+          SRC="${GITHUB_REF_NAME}"
+          TGT="${{ matrix.base }}"
 
-          # Vérifie combien de commits SRC a en avance sur TGT
-          AHEAD=$(git rev-list --right-only --count "origin/${TGT}...origin/${SRC}")
-          echo "Commits ahead from ${SRC} to ${TGT}: ${AHEAD}"
+          AHEAD=$(git rev-list --right-only --count "origin/${TGT}...origin/${SRC}" || echo 0)
+          DIFF=$(git diff --name-only "origin/${TGT}...origin/${SRC}" | wc -l | xargs)
 
-          if [ "$AHEAD" -eq 0 ]; then
-            echo "Nothing to forward. Exiting."
+          echo "Ahead=${AHEAD}  ChangedFiles=${DIFF} for ${SRC} → ${TGT}"
+
+          if [ "$AHEAD" -eq 0 ] || [ "$DIFF" -eq 0 ]; then
+            echo "Skip: nothing new to forward to ${TGT}."
             exit 0
           fi
 
-          # Vérifie s'il existe déjà une PR ouverte SRC -> TGT
+          # Crée la PR si aucune n'est déjà ouverte
           OPEN=$(gh pr list --state open --base "$TGT" --head "$SRC" --json number --jq 'length')
           if [ "$OPEN" -eq 0 ]; then
             gh pr create \
