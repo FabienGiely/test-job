@@ -1,4 +1,4 @@
-name: Forward to main (simple)
+name: Forward to main
 on:
   push:
     branches: [ "release/*" ]  # à chaque push/merge sur une branche release
@@ -13,35 +13,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # important: historique complet
+          fetch-depth: 0
 
-      - name: Open PR if release is ahead of main
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          SRC="${GITHUB_REF_NAME}"      # ex: release/0.1
-          TGT="main"
-
-          git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
-
-          # Nombre de commits présents dans SRC mais pas dans TGT
-          AHEAD=$(git rev-list --right-only --count "origin/${TGT}...origin/${SRC}")
-          echo "Ahead commits from ${SRC} to ${TGT}: ${AHEAD}"
-
-          if [ "$AHEAD" -eq 0 ]; then
-            echo "Nothing to forward. Exiting."
-            exit 0
-          fi
-
-          # Évite les doublons si une PR est déjà ouverte
-          if gh pr list --state open --base "$TGT" --head "$SRC" --json number --jq 'length' | grep -qx '0'; then
-            gh pr create \
-              --base "$TGT" \
-              --head "$SRC" \
-              --title "chore: forward ${SRC} → ${TGT}" \
-              --body  "Propagation automatique depuis \`${SRC}\`."
-          else
-            echo "PR already open from ${SRC} to ${TGT}."
-          fi
+      - name: Open/Update PR to main
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          title: "chore: forward merge `${{ github.ref_name }}` → main"
+          body: "Propagation automatique depuis `${{ github.ref_name }}`."
+          base: main
+          branch: auto/forward/${{ github.ref_name }}-to-main
+          delete-branch: true
