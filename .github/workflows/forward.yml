@@ -15,53 +15,77 @@ jobs:
   detect-targets:
     runs-on: ubuntu-latest
     outputs:
-      targets: ${{ steps.out.outputs.targets }}
+      matrix: ${{ steps.build.outputs.matrix }}   # ← on sort un tableau JSON d'objets { "base": "…" }
     env:
-      MAX_FORWARD: "5"     # ← ajuste ici : 3, 4, 5 lignes au max
-      INCLUDE_MAIN: "true" # met "false" si tu ne veux pas créer de PR vers main
+      MAX_FORWARD: "5"
+      INCLUDE_MAIN: "true"
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
 
-      - name: Build targets list (JSON)
-        id: out
+      - name: Build forward matrix JSON
+        id: build
+        shell: bash
         run: |
+          set -euo pipefail
           branch="${GITHUB_REF_NAME}"   # ex: release/6.1
-          [[ "$branch" =~ ^release/([0-9]+)\.([0-9]+)$ ]] || { echo "Not a release branch"; exit 1; }
+          if [[ ! "$branch" =~ ^release/([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Not a release/M.N branch" >&2
+            echo 'matrix=[]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           M="${BASH_REMATCH[1]}"
-          N="${BASHREMATCH[2]:-${BASH_REMATCH[2]}}"  # guard
+          N="${BASH_REMATCH[2]}"
 
-          # Lister les branches release/M.*
-          mapfile -t rels < <(git ls-remote --heads origin "refs/heads/release/${M}.*" | awk '{print $2}' | sed 's#refs/heads/##' | sort -t. -k2,2n)
+          # Liste des branches release/M.*
+          mapfile -t rels < <(git ls-remote --heads origin "refs/heads/release/${M}.*" \
+                               | awk '{print $2}' | sed 's#refs/heads/##' \
+                               | sort -t. -k2,2n)
+
+          # Construit la liste des cibles: release/M.(N+1..N+MAX_FORWARD) si elles existent
           targets=()
-
-          # Ajouter les mineures supérieures N+1 .. N+MAX_FORWARD si elles existent
-          i=1
-          while [ $i -le ${MAX_FORWARD} ]; do
+          for ((i=1; i<=${MAX_FORWARD}; i++)); do
             next="release/${M}.$((N+i))"
             if printf '%s\n' "${rels[@]}" | grep -qx "$next"; then
               targets+=("$next")
             fi
-            i=$((i+1))
           done
 
-          # Optionnel: ajouter main
-          if [ "${INCLUDE_MAIN}" = "true" ]; then
+          # Ajoute main si demandé
+          if [[ "${INCLUDE_MAIN}" == "true" ]]; then
             targets+=("main")
           fi
 
-          # Dédupliquer et transformer en JSON
-          uniq_targets=$(printf "%s\n" "${targets[@]}" | awk '!seen[$0]++')
-          json=$(printf '%s\n' "$uniq_targets" | jq -R . | jq -s .)
-          echo "targets=$json" >> "$GITHUB_OUTPUT"
+          # Déduplique
+          # shellcheck disable=SC2207
+          targets=($(printf '%s\n' "${targets[@]}" | awk '!seen[$0]++'))
+
+          # Construit un JSON pour matrix.include: [ {"base":"release/6.2"}, {"base":"main"} ]
+          if [ ${#targets[@]} -eq 0 ]; then
+            echo 'matrix=[]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          json='['
+          sep=''
+          for t in "${targets[@]}"; do
+            # échappe les quotes si jamais
+            esc=$(printf '%s' "$t" | sed 's/"/\\"/g')
+            json="${json}${sep}{\"base\":\"${esc}\"}"
+            sep=','
+          done
+          json="${json}]"
+
+          # Exporte proprement (ligne unique)
+          echo "matrix=${json}" >> "$GITHUB_OUTPUT"
 
   forward:
     needs: detect-targets
-    if: ${{ needs.detect-targets.outputs.targets != '[]' }}
+    if: ${{ needs.detect-targets.outputs.matrix != '[]' }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        base: ${{ fromJson(needs.detect-targets.outputs.targets) }}
+        include: ${{ fromJson(needs.detect-targets.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
