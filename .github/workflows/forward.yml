@@ -1,4 +1,4 @@
-name: Forward merges (multi-line with PAT + diff check)
+name: Forward merges (multi-line with PAT + diff check + debug)
 on:
   push:
     branches: [ "release/*" ]
@@ -13,19 +13,21 @@ jobs:
     outputs:
       matrix: ${{ steps.build.outputs.matrix }}
     env:
-      MAX_FORWARD: "5"     # nombre max de mineures à propager
-      INCLUDE_MAIN: "true" # ajoute main comme cible
+      MAX_FORWARD: "5"     # p.ex. 5 lignes supérieures max
+      INCLUDE_MAIN: "true" # crée aussi une PR vers main
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
 
-      - name: Build forward targets
+      - name: Build forward targets (and show what we found)
         id: build
         shell: bash
         run: |
           set -euo pipefail
-          branch="${GITHUB_REF_NAME}"   # ex: release/0.1
-          if [[ ! "$branch" =~ ^release/([0-9]+)\.([0-9]+)$ ]]; then
+          SRC="${GITHUB_REF_NAME}"   # ex: release/1.0
+          echo "Source branch: ${SRC}"
+          if [[ ! "$SRC" =~ ^release/([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Not a release/M.N branch → skip."
             echo "matrix=[]" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -33,7 +35,10 @@ jobs:
           N="${BASH_REMATCH[2]}"
 
           git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
-          mapfile -t rels < <(git branch -r --list "origin/release/${M}.*" | sed 's#origin/##')
+          echo "Remote release branches (same major ${M}):"
+          git branch -r --list "origin/release/${M}.*" | sed 's#origin/##' | sort -t. -k2,2n || true
+
+          mapfile -t rels < <(git branch -r --list "origin/release/${M}.*" | sed 's#origin/##' | sort -t. -k2,2n)
 
           targets=()
           for ((i=1; i<=${MAX_FORWARD}; i++)); do
@@ -42,22 +47,23 @@ jobs:
               targets+=("$next")
             fi
           done
-
           if [[ "${INCLUDE_MAIN}" == "true" ]]; then
             targets+=("main")
           fi
 
+          # dedup
           uniq_targets=$(printf "%s\n" "${targets[@]}" | awk '!seen[$0]++')
 
-          json='['
-          sep=''
+          echo "Forward targets detected:"
+          printf ' - %s\n' $uniq_targets
+
+          # JSON pour matrix.include
+          json='['; sep=''
           for t in $uniq_targets; do
-            json="${json}${sep}{\"base\":\"${t}\"}"
-            sep=','
+            json="${json}${sep}{\"base\":\"${t}\"}"; sep=','
           done
           json="${json}]"
-
-          echo "matrix=$json" >> "$GITHUB_OUTPUT"
+          echo "matrix=${json}" >> "$GITHUB_OUTPUT"
 
   forward:
     needs: detect-targets
@@ -73,40 +79,47 @@ jobs:
       - name: Fetch all branches
         run: git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
 
+      - name: Show ahead/diff against target
+        shell: bash
+        run: |
+          SRC="${GITHUB_REF_NAME}"
+          TGT="${{ matrix.base }}"
+          echo "=== ${SRC} → ${TGT} ==="
+          echo "Ahead commits:"
+          git rev-list --right-only --count "origin/${TGT}...origin/${SRC}" || true
+          echo "--- short log (SRC not in TGT) ---"
+          git log --oneline --left-right "origin/${TGT}...origin/${SRC}" | sed -n 's/^>//p' | head -50 || true
+          echo "--- diff stat ---"
+          git diff --stat "origin/${TGT}...origin/${SRC}" || true
+          echo "==============================="
+
       - name: Open PR with PAT if ahead and diff
         env:
           GH_TOKEN: ${{ secrets.PAT_FORWARD }}
         shell: bash
         run: |
-          SRC="${GITHUB_REF_NAME}"   # ex: release/0.1
+          set -euo pipefail
+          SRC="${GITHUB_REF_NAME}"
           TGT="${{ matrix.base }}"
 
-          echo "Checking $SRC → $TGT"
-
-          # Vérifie commits ahead
           AHEAD=$(git rev-list --right-only --count "origin/${TGT}...origin/${SRC}" || echo 0)
-          if [ "$AHEAD" -eq 0 ]; then
-            echo "No commits ahead from $SRC to $TGT."
-            exit 0
-          fi
-
-          # Vérifie diff de fichiers
           DIFF=$(git diff --name-only "origin/${TGT}...origin/${SRC}" | wc -l | xargs)
-          if [ "$DIFF" -eq 0 ]; then
-            echo "Commits ahead but no file changes from $SRC to $TGT."
+
+          echo "Ahead=${AHEAD}  ChangedFiles=${DIFF} for ${SRC} → ${TGT}"
+
+          if [ "$AHEAD" -eq 0 ] || [ "$DIFF" -eq 0 ]; then
+            echo "Skip: nothing new to forward to ${TGT}."
             exit 0
           fi
 
-          echo "Ahead commits: $AHEAD, Changed files: $DIFF"
-
-          # Ouvre une PR seulement si aucune n'existe déjà
+          # Crée la PR si aucune n'est déjà ouverte
           OPEN=$(gh pr list --state open --base "$TGT" --head "$SRC" --json number --jq 'length')
           if [ "$OPEN" -eq 0 ]; then
             gh pr create \
               --base "$TGT" \
               --head "$SRC" \
-              --title "chore: forward $SRC → $TGT" \
-              --body  "Propagation automatique depuis \`$SRC\`."
+              --title "chore: forward ${SRC} → ${TGT}" \
+              --body  "Propagation automatique depuis \`${SRC}\`."
           else
-            echo "PR already open from $SRC to $TGT"
+            echo "PR already open from ${SRC} to ${TGT}."
           fi
