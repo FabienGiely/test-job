@@ -1,0 +1,50 @@
+name: Forward to main (with PAT)
+on:
+  push:
+    branches: [ "release/*" ]   # à chaque push/merge sur une branche release
+
+permissions:
+  contents: read   # on n’utilise pas le GITHUB_TOKEN ici pour créer la PR
+  pull-requests: read
+
+jobs:
+  forward:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch all branches
+        run: |
+          git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
+
+      - name: Open PR if release is ahead of main
+        env:
+          GH_TOKEN: ${{ secrets.PAT_FORWARD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="${GITHUB_REF_NAME}"    # ex: release/0.1
+          TGT="main"
+
+          # Vérifie combien de commits SRC a en avance sur TGT
+          AHEAD=$(git rev-list --right-only --count "origin/${TGT}...origin/${SRC}")
+          echo "Commits ahead from ${SRC} to ${TGT}: ${AHEAD}"
+
+          if [ "$AHEAD" -eq 0 ]; then
+            echo "Nothing to forward. Exiting."
+            exit 0
+          fi
+
+          # Vérifie s'il existe déjà une PR ouverte SRC -> TGT
+          OPEN=$(gh pr list --state open --base "$TGT" --head "$SRC" --json number --jq 'length')
+          if [ "$OPEN" -eq 0 ]; then
+            gh pr create \
+              --base "$TGT" \
+              --head "$SRC" \
+              --title "chore: forward ${SRC} → ${TGT}" \
+              --body  "Propagation automatique depuis \`${SRC}\`."
+          else
+            echo "PR already open from ${SRC} to ${TGT}."
+          fi
