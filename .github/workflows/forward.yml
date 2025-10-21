@@ -10,6 +10,7 @@ permissions:
 jobs:
   detect-targets:
     runs-on: ubuntu-latest
+
     outputs:
       matrix: ${{ steps.build.outputs.matrix }}
     env:
