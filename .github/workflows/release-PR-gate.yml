@@ -1,0 +1,88 @@
+name: PR Gate — head commit must be a release tag
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - "releases-preprod"
+      - "releases-beta"
+      - "releases-prod"
+      - "releases-gate"
+
+jobs:
+  require_tagged_head:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      # Vérifie si le HEAD de la PR est exactement tagué vX.Y.Z (sans échouer le job ici)
+      - name: Check PR head has exact vX.Y.Z tag
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA="${{ github.event.pull_request.head.sha }}"
+          BASE="${{ github.event.pull_request.base.ref }}"   # ex: releases-preprod
+          HEADBR="${{ github.event.pull_request.head.ref }}" # ex: release/6.2
+
+          git fetch --tags --force
+
+          # Est-ce que le commit de la PR est exactement tagué ?
+          TAG=$(git tag --points-at "$SHA" --list 'v[0-9]*.[0-9]*.[0-9]*' | head -n1 || true)
+
+          if [ -n "$TAG" ]; then
+            echo "ok=true"  >> "$GITHUB_OUTPUT"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "PR head is exactly tag $TAG"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "tag="     >> "$GITHUB_OUTPUT"
+
+            # Message d’aide (affiché aussi dans le commentaire)
+            cat > msg.txt <<'TXT'
+            ❌ Cette PR ne pointe pas sur un commit de release (tag `vX.Y.Z`).
+            
+            Ce qu’il faut faire :
+            1) **Créer une release taguée** sur la branche `release/X.Y` concernée (ex.: merger sur `release/6.2` pour déclencher la CI qui crée `v6.2.Z`), ou créer le tag `vX.Y.Z` sur le commit voulu.
+            2) **Faire pointer la PR exactement sur ce commit tagué** :
+               - soit en mettant à jour la branche source de la PR pour qu’elle pointe sur le tag (`git reset --hard vX.Y.Z && git push -f`),
+               - soit en recréant la PR depuis le commit tagué.
+            
+            Les déploiements `releases-preprod/beta/prod` n’acceptent que des commits **exactement tagués**.
+            TXT
+
+            echo "help=$(python - <<'PY'
+            import urllib.parse
+            print(urllib.parse.quote(open("msg.txt","r",encoding="utf-8").read()))
+            PY
+            )" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comment PR
+        if: ${{ steps.check.outputs.ok != 'true' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const number = context.payload.pull_request.number;
+            const base = context.payload.pull_request.base.ref;
+            const head = context.payload.pull_request.head.ref;
+            const help = decodeURIComponent(`${{ steps.check.outputs.help }}`);
+            const body = `### Gate: commit non tagué pour **${base}**\n\n` +
+                         `Branche source: \`${head}\`\n\n` + help;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: number,
+              body
+            });
+
+      - name: Fail if not OK
+        if: ${{ steps.check.outputs.ok != 'true' }}
+        run: |
+          echo "Blocking: PR head is not exactly a vX.Y.Z tag."
+          exit 1
