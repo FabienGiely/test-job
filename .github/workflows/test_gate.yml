@@ -1,0 +1,79 @@
+name: Build and Deploy to S3
+
+on:
+  push:
+    branches:
+      - "release-gate"
+      - "release-dev"
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Strict gate HEAD tag or merge-from tagged release
+        shell: bash
+        run: |
+          set -euo pipefail
+          BR="${GITHUB_REF_NAME}"
+  
+          # Laisse dev libre
+          if [[ "$BR" == "releases-dev" ]]; then
+            echo "No release tag required for $BR"
+            exit 0
+          fi
+  
+          git fetch --tags --force
+  
+          # 1) Cas simple : HEAD est exactement un tag vX.Y.Z
+          if git describe --tags --match 'v[0-9]*.[0-9]*.[0-9]*' --exact-match >/dev/null 2>&1; then
+            echo "OK: HEAD is exactly a release tag"
+            exit 0
+          fi
+  
+          # 2) Cas merge commit : on exige que le 2e parent soit exactement un tag vX.Y.Z
+          #    (i.e. le commit de release/X.X mergé)
+          line=$(git rev-list --parents -n 1 HEAD)
+          set -- $line
+          head_sha=$1
+          shift
+          parent_count=$#
+          if (( parent_count >= 2 )); then
+            # parent1 = état précédent de la branche d'env ; parent2 = tête de release mergée
+            # (Git les ordonne ainsi pour un merge standard)
+            parent2=$(git rev-parse HEAD^2)
+  
+            # y a-t-il un tag vX.Y.Z *exactement* sur parent2 ?
+            if tag=$(git tag --points-at "$parent2" --list 'v[0-9]*.[0-9]*.[0-9]*' | head -n1); then
+              if [[ -n "$tag" ]]; then
+                echo "OK: merge commit; source parent ($parent2) is exactly tagged $tag"
+                exit 0
+              fi
+            fi
+  
+            echo "::error::HEAD is a merge commit, but the source parent (HEAD^2=$parent2) is not exactly a release tag (vX.Y.Z)."
+            echo "Use a non-squash merge from the tagged release commit, or fast-forward/reset the env branch to the tag."
+            exit 1
+          fi
+  
+          # 3) Sinon, refus (HEAD n’est pas tagué et ce n’est pas un merge à partir d’un tag)
+          echo "::error::Deployment blocked: HEAD is not exactly a release tag and not a merge-from tagged release."
+          echo "Make the env branch point to a tagged commit (vX.Y.Z), e.g.:"
+          echo "  git checkout $BR && git merge --ff-only v6.2.12"
+          echo "  # ou:"
+          echo "  git checkout $BR && git reset --hard v6.2.12 && git push -f"
+          exit 1
+
+  build-and-deploy:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with: { fetch-depth: 0 }
+
+      - name: Echo
+        shell: bash
+        run: |
+          echo "Deploy job is running"
