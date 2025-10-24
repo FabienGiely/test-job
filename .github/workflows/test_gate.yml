@@ -20,7 +20,7 @@ jobs:
           BR="${GITHUB_REF_NAME}"
   
           # Laisse dev libre
-          if [[ "$BR" == "releases-dev" ]]; then
+          if [[ "$BR" == "release-dev" ]]; then
             echo "No release tag required for $BR"
             exit 0
           fi
