@@ -41,7 +41,7 @@ jobs:
             exit 0
           fi
 
-          read -r -d '' HELP <<'EOF'
+          HELP="$(cat <<'EOF'
           ❌ Cette PR ne pointe pas sur un commit de release (tag `vX.Y.Z`).
           
           Ce qu’il faut faire :
@@ -55,8 +55,9 @@ jobs:
           
           Les déploiements `releases-preprod/beta/prod` n’acceptent que des commits **exactement tagués**.
           EOF
+          )"
 
-          HELP_B64="$(printf '%s' "$HELP" | base64 -w0)"
+          HELP_B64="$(printf '%s' "$HELP" | base64 -w0 || echo "$HELP" | base64)"
           echo "ok=false"            >> "$GITHUB_OUTPUT"
           echo "help_b64=$HELP_B64"  >> "$GITHUB_OUTPUT"
 
