@@ -91,7 +91,7 @@ jobs:
           echo "tgt=${TGT}"     >> "$GITHUB_OUTPUT"
           echo "AHEAD=$AHEAD DIFF=$DIFF for $SRC → $TGT"
 
-      - name: Create PR via REST
+      - name: Create PR via REST if needed
         if: ${{ steps.decide.outputs.ahead != '0' && steps.decide.outputs.diff != '0' }}
         uses: actions/github-script@v7
         with:
@@ -110,12 +110,14 @@ jobs:
             if (prs.data.length > 0) {
               core.info(`PR already open: #${prs.data[0].number}`); return;
             }
+            const title = `chore: forward ${src} → ${base}`;
+            const body  = `Propagation automatique depuis \`${src}\`.\n(AHEAD=${{ steps.decide.outputs.ahead }}, DIFF=${{ steps.decide.outputs.diff }})`;
             const pr = await github.rest.pulls.create({
               owner: context.repo.owner,
               repo:  context.repo.repo,
               head:  src,
               base,
-              title: `chore: forward ${src} → ${base}`,
-              body:  `Propagation automatique depuis \`${src}\`.`
+              title,
+              body
             });
             core.info(`Opened PR #${pr.data.number}`);
