@@ -1,0 +1,84 @@
+name: PR Gate — head commit must be a release tag
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - "releases-preprod"
+      - "releases-beta"
+      - "releases-prod"
+      - "release-gate"
+
+jobs:
+  require_tagged_head:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      # Vérifie si le HEAD de la PR est exactement tagué vX.Y.Z (sans échouer le job ici)
+      - name: Check PR head has exact vX.Y.Z tag
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA="${{ github.event.pull_request.head.sha }}"
+          BASE="${{ github.event.pull_request.base.ref }}"   # ex: releases-preprod
+          HEADBR="${{ github.event.pull_request.head.ref }}" # ex: release/6.2
+
+          git fetch --tags --force
+
+          TAG="$(git tag --points-at "$SHA" --list 'v[0-9]*.[0-9]*.[0-9]*' | head -n1 || true)"
+
+          if [ -n "$TAG" ]; then
+            echo "ok=true"  >> "$GITHUB_OUTPUT"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "PR head is exactly tag $TAG"
+            exit 0
+          fi
+
+          HELP="$(cat <<'EOF'
+          ❌ Cette PR ne pointe pas sur un commit de release (tag `vX.Y.Z`).
+          
+          Ce qu’il faut faire :
+          1) **Créer une release taguée** sur la branche `release/X.Y` concernée
+             merger sur `release/X.Y` pour déclencher la CI qui crée `vX.Y.Z`
+          2) **Faire pointer la PR exactement sur ce commit tagué**
+          
+          Les déploiements `releases-preprod/beta/prod` n’acceptent que des commits **exactement tagués**.
+          
+          ⚠️ Tu peux continuer le merge, mais la release sera bloqué ⚠️
+          EOF
+          )"
+
+          HELP_B64="$(printf '%s' "$HELP" | base64 -w0 || echo "$HELP" | base64)"
+          echo "ok=false"            >> "$GITHUB_OUTPUT"
+          echo "help_b64=$HELP_B64"  >> "$GITHUB_OUTPUT"
+
+      - name: Comment PR with guidance
+        if: ${{ steps.check.outputs.ok != 'true' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const number = context.payload.pull_request.number;
+            const base   = context.payload.pull_request.base.ref;
+            const head   = context.payload.pull_request.head.ref;
+            const help   = Buffer.from(`${{ steps.check.outputs.help_b64 }}`,'base64').toString('utf8');
+            const body = `### Gate: commit non tagué pour **${base}**\n\nBranche source: \`${head}\`\n\n${help}`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: number,
+              body
+            });
+
+      - name: Fail if not OK
+        if: ${{ steps.check.outputs.ok != 'true' }}
+        run: |
+          echo "Blocking: PR head is not exactly a vX.Y.Z tag."
+          exit 1
