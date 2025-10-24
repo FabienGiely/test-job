@@ -46,14 +46,12 @@ jobs:
           
           Ce qu’il faut faire :
           1) **Créer une release taguée** sur la branche `release/X.Y` concernée
-             (ex.: merger sur `release/6.2` pour déclencher la CI qui crée `v6.2.Z`),
-             ou créer le tag `vX.Y.Z` sur le commit voulu.
-          2) **Faire pointer la PR exactement sur ce commit tagué** :
-             - en mettant à jour la branche source de la PR pour qu’elle pointe sur le tag :
-               `git reset --hard vX.Y.Z && git push -f`
-             - ou en recréant la PR depuis le commit tagué.
+             merger sur `release/X.Y` pour déclencher la CI qui crée `vX.Y.Z`
+          2) **Faire pointer la PR exactement sur ce commit tagué**
           
           Les déploiements `releases-preprod/beta/prod` n’acceptent que des commits **exactement tagués**.
+          
+          ⚠️ Tu peux continuer le merge, mais la release sera bloqué ⚠️
           EOF
           )"
 
