@@ -7,7 +7,7 @@ on:
       - "releases-preprod"
       - "releases-beta"
       - "releases-prod"
-      - "releases-gate"
+      - "release-gate"
 
 jobs:
   require_tagged_head:
