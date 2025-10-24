@@ -15,6 +15,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
@@ -31,36 +32,34 @@ jobs:
 
           git fetch --tags --force
 
-          # Est-ce que le commit de la PR est exactement tagué ?
-          TAG=$(git tag --points-at "$SHA" --list 'v[0-9]*.[0-9]*.[0-9]*' | head -n1 || true)
+          TAG="$(git tag --points-at "$SHA" --list 'v[0-9]*.[0-9]*.[0-9]*' | head -n1 || true)"
 
           if [ -n "$TAG" ]; then
             echo "ok=true"  >> "$GITHUB_OUTPUT"
             echo "tag=$TAG" >> "$GITHUB_OUTPUT"
             echo "PR head is exactly tag $TAG"
-          else
-            echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "tag="     >> "$GITHUB_OUTPUT"
-
-            # Message d’aide (affiché aussi dans le commentaire)
-            cat > msg.txt <<'TXT'
-            ❌ Cette PR ne pointe pas sur un commit de release (tag `vX.Y.Z`).
-            
-            Ce qu’il faut faire :
-            1) **Créer une release taguée** sur la branche `release/X.Y` concernée (ex.: merger sur `release/6.2` pour déclencher la CI qui crée `v6.2.Z`), ou créer le tag `vX.Y.Z` sur le commit voulu.
-            2) **Faire pointer la PR exactement sur ce commit tagué** :
-               - soit en mettant à jour la branche source de la PR pour qu’elle pointe sur le tag (`git reset --hard vX.Y.Z && git push -f`),
-               - soit en recréant la PR depuis le commit tagué.
-            
-            Les déploiements `releases-preprod/beta/prod` n’acceptent que des commits **exactement tagués**.
-            TXT
-
-            echo "help=$(python - <<'PY'
-            import urllib.parse
-            print(urllib.parse.quote(open("msg.txt","r",encoding="utf-8").read()))
-            PY
-            )" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          read -r -d '' HELP <<'EOF'
+          ❌ Cette PR ne pointe pas sur un commit de release (tag `vX.Y.Z`).
+          
+          Ce qu’il faut faire :
+          1) **Créer une release taguée** sur la branche `release/X.Y` concernée
+             (ex.: merger sur `release/6.2` pour déclencher la CI qui crée `v6.2.Z`),
+             ou créer le tag `vX.Y.Z` sur le commit voulu.
+          2) **Faire pointer la PR exactement sur ce commit tagué** :
+             - en mettant à jour la branche source de la PR pour qu’elle pointe sur le tag :
+               `git reset --hard vX.Y.Z && git push -f`
+             - ou en recréant la PR depuis le commit tagué.
+          
+          💡 Raison : les déploiements `releases-preprod/beta/prod` n’acceptent que des commits **exactement tagués**.
+          EOF
+
+          # encode en base64 pour le passer proprement
+          HELP_B64="$(printf '%s' "$HELP" | base64 -w0)"
+          echo "ok=false"            >> "$GITHUB_OUTPUT"
+          echo "help_b64=$HELP_B64"  >> "$GITHUB_OUTPUT"
 
       - name: Comment PR
         if: ${{ steps.check.outputs.ok != 'true' }}
